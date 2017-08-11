@@ -10,6 +10,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import os.path
+import subprocess
 import requests
 import traceback
 import json
@@ -408,37 +409,23 @@ class Visdom(object):
             'should specify video tensor or file'
 
         if tensor is not None:
-            import cv2
             import tempfile
             assert tensor.ndim == 4, 'video should be in 4D tensor'
-            videofile = '/tmp/%s.ogv' % next(tempfile._get_candidate_names())
-            if cv2.__version__.startswith('2'):  # OpenCV 2
-                fourcc = cv2.cv.CV_FOURCC(
-                    chr(ord('T')),
-                    chr(ord('H')),
-                    chr(ord('E')),
-                    chr(ord('O'))
-                )
-            elif cv2.__version__.startswith('3'):  # OpenCV 3
-                fourcc = cv2.VideoWriter_fourcc(
-                    chr(ord('T')),
-                    chr(ord('H')),
-                    chr(ord('E')),
-                    chr(ord('O'))
-                )
-            writer = cv2.VideoWriter(
-                videofile,
-                fourcc,
-                opts.get('fps'),
-                (tensor.shape[1], tensor.shape[2])
-            )
-            assert writer.isOpened(), 'video writer could not be opened'
-            for i in range(tensor.shape[0]):
-                writer.write(tensor[i, :, :, :])
-            writer.release()
-            writer = None
+            videofile = '/tmp/%s.webm' % next(tempfile._get_candidate_names())
+            downsample_cmd = ['ffmpeg',
+                              '-s:v', '{}x{}'.format(tensor.shape[2],
+                                                     tensor.shape[1]),
+                              '-f', 'rawvideo',
+                              '-i', 'pipe:0',
+                              '-c:v', 'libvpx',
+                              '-y', videofile,
+                              '-loglevel', 'warning']
+            subprocess.run(downsample_cmd, input=tensor.tobytes())
 
-        extension = videofile[-3:].lower()
+        extension = videofile[-4:].lower()
+        if extension != 'webm':
+            extension = extension[1:]
+
         mimetypes = dict(mp4='mp4', ogv='ogg', avi='avi', webm='webm')
         mimetype = mimetypes.get(extension)
         assert mimetype is not None, 'unknown video type: %s' % extension
