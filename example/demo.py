@@ -28,11 +28,12 @@ try:
         video[n, :, :, :].fill(n)
     viz.video(tensor=video)
 
-    # video demo: download video from http://media.w3.org/2010/05/sintel/trailer.ogv
+    # video demo: download video from
+    # http://media.w3.org/2010/05/sintel/trailer.ogv
     video_url = 'http://media.w3.org/2010/05/sintel/trailer.ogv'
     # linux
     if _platform == "linux" or _platform == "linux2":
-        videofile = '/home/%s/trailer.ogv' % getpass.getuser()
+        videofile = os.path.join(os.getenv('HOME'), 'trailer.ogv')
     # MAC OS X
     elif _platform == "darwin":
         videofile = '/Users/%s/trailer.ogv' % getpass.getuser()
