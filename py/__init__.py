@@ -411,13 +411,14 @@ class Visdom(object):
         if tensor is not None:
             import tempfile
             assert tensor.ndim == 4, 'video should be in 4D tensor'
-            videofile = '/tmp/%s.webm' % next(tempfile._get_candidate_names())
+            videofile = '/tmp/%s.mp4' % next(tempfile._get_candidate_names())
             downsample_cmd = ['ffmpeg',
                               '-s:v', '{}x{}'.format(tensor.shape[2],
                                                      tensor.shape[1]),
                               '-f', 'rawvideo',
+                              '-pix_fmt', 'rgb24',
                               '-i', 'pipe:0',
-                              '-c:v', 'libvpx',
+                              '-c:v', 'libx264',
                               '-y', videofile,
                               '-loglevel', 'warning']
             subprocess.run(downsample_cmd, input=tensor.tobytes())
@@ -431,6 +432,7 @@ class Visdom(object):
         assert mimetype is not None, 'unknown video type: %s' % extension
 
         bytestr = loadfile(videofile)
+        os.remove(videofile)
         videodata = """
             <video controls>
                 <source type="video/%s" src="data:video/%s;base64,%s">
