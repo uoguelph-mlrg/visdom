@@ -169,6 +169,7 @@ class App extends React.Component {
         }, () => {this.selectEnv(this.state.envID)});
         break;
       case 'pane':
+      case 'window':
         this.addPaneBatched(cmd);
         break;
       case 'reload':

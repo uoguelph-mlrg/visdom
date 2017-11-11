@@ -14,12 +14,14 @@ from __future__ import unicode_literals
 import math
 import json
 import logging
+import traceback
 import os
 import inspect
 import time
 import getpass
 import argparse
 import copy
+import visdom
 
 from os.path import expanduser
 from zmq.eventloop import ioloop
@@ -30,15 +32,28 @@ import tornado.web
 import tornado.websocket
 import tornado.escape
 
-logging.getLogger().setLevel(logging.INFO)
-
 parser = argparse.ArgumentParser(description='Start the visdom server.')
 parser.add_argument('-port', metavar='port', type=int, default=8097,
                     help='port to run the server on.')
 parser.add_argument('-env_path', metavar='env_path', type=str,
                     default='%s/.visdom/' % expanduser("~"),
-                    help='path to serialized session to reload (end with /).')
+                    help='path to serialized session to reload.')
+parser.add_argument('-logging_level', metavar='logger_level', default='INFO',
+                    help='logging level (default = INFO). Can take logging '
+                         'level name or int (example: 20)')
 FLAGS = parser.parse_args()
+
+try:
+    logging_level = int(FLAGS.logging_level)
+except (ValueError,):
+    try:
+        logging_level = logging._checkLevel(FLAGS.logging_level)
+    except ValueError:
+        raise KeyError(
+            "Invalid logging level : {0}".format(FLAGS.logging_level)
+        )
+
+logging.getLogger().setLevel(logging_level)
 
 
 def get_rand_id():
@@ -88,7 +103,7 @@ tornado_settings = {
 def serialize_env(state, eids):
     l = [i for i in eids if i in state]
     for i in l:
-        p = '%s/%s.json' % (FLAGS.env_path, i)
+        p = os.path.join(FLAGS.env_path, "{0}.json".format(i))
         open(p, 'w').write(json.dumps(state[i]))
     return l
 
@@ -123,8 +138,9 @@ class Application(tornado.web.Application):
             (r"/socket", SocketHandler, dict(state=state, subs=subs)),
             (r"/env/(.*)", EnvHandler, dict(state=state, subs=subs)),
             (r"/save", SaveHandler, dict(state=state, subs=subs)),
-            (r"/error/(.*)", ErrorHandler),
-            (r"/(.*)", IndexHandler, dict(state=state)),
+            (r"/error/(.*)", ErrorHandler, dict(state=state, subs=subs)),
+            (r"/win_exists", ExistsHandler, dict(state=state, subs=subs)),
+            (r"/(.*)", IndexHandler, dict(state=state, subs=subs)),
         ]
         super(Application, self).__init__(handlers, **tornado_settings)
 
@@ -142,23 +158,23 @@ class SocketHandler(tornado.websocket.WebSocketHandler):
         if self not in list(self.subs.values()):
             self.eid = 'main'
             self.subs[self.sid] = self
-        print('Opened new socket from ip:', self.request.remote_ip)
+        logging.info('Opened new socket from ip: {}'.format(self.request.remote_ip))
 
         self.write_message(
             json.dumps({'command': 'register', 'data': self.sid}))
 
     def on_message(self, message):
-        print('from web client: ', message)
+        logging.info('from web client: {}'.format(message))
         msg = tornado.escape.json_decode(tornado.escape.to_basestring(message))
 
         cmd = msg.get('cmd')
         if cmd == 'close':
             if 'data' in msg and 'eid' in msg:
-                print('closing pane ', msg['data'])
+                logging.info('closing window {}'.format(msg['data']))
                 self.state[msg['eid']]['jsons'].pop(msg['data'], None)
 
         elif cmd == 'save':
-            # save localStorage pane metadata
+            # save localStorage window metadata
             if 'data' in msg and 'eid' in msg:
                 msg['eid'] = escape_eid(msg['eid'])
                 self.state[msg['eid']] = copy.deepcopy(self.state[msg['prev_eid']])
@@ -199,25 +215,32 @@ class BaseHandler(tornado.web.RequestHandler):
                 logging.error(e)
 
 
-def pane(args):
-    """ Build a pane dict structure for sending to client """
+def window(args):
+    """ Build a window dict structure for sending to client """
+    uid = args.get('win', 'window_' + get_rand_id())
+    if uid is None:
+        uid = 'window_' + get_rand_id()
+    opts = args.get('opts', {})
 
-    if args.get('win') is None:
-        uid = 'pane_' + get_rand_id()
-    else:
-        uid = args['win']
+    ptype = args['data'][0]['type']
 
-    opts = args['opts']
-
-    return {
-        'command': 'pane',
+    p = {
+        'command': 'window',
         'id': str(uid),
         'title': opts.get('title', ''),
         'inflate': opts.get('inflate', True),
         'width': opts.get('width'),
         'height': opts.get('height'),
-        'contentID': get_rand_id(),   # to detected updated panes
+        'contentID': get_rand_id(),   # to detected updated windows
     }
+
+    if ptype in ['image', 'text']:
+        p.update(dict(content=args['data'][0]['content'], type=ptype))
+    else:
+        p['content'] = dict(data=args['data'], layout=args['layout'])
+        p['type'] = 'plot'
+
+    return p
 
 
 def broadcast(self, msg, eid):
@@ -226,7 +249,7 @@ def broadcast(self, msg, eid):
             self.subs[s].write_message(msg)
 
 
-def register_pane(self, p, eid):
+def register_window(self, p, eid):
     # in case env doesn't exist
     self.state[eid] = self.state.get(eid, {'jsons': {}, 'reload': {}})
     env = self.state[eid]['jsons']
@@ -242,25 +265,85 @@ def register_pane(self, p, eid):
     self.write(p['id'])
 
 
+def unpack_lua(req_args):
+    if req_args['is_table']:
+        if isinstance(req_args['val'], dict):
+            return {k: unpack_lua(v) for (k, v) in req_args['val'].items()}
+        else:
+            return [unpack_lua(v) for v in req_args['val']]
+    elif req_args['is_tensor']:
+        return visdom.from_t7(req_args['val'], b64=True)
+    else:
+        return req_args['val']
+
+
 class PostHandler(BaseHandler):
     def initialize(self, state, subs):
         self.state = state
         self.subs = subs
+        self.vis = visdom.Visdom(port=FLAGS.port, send=False)
+        self.handlers = {
+            'update': UpdateHandler,
+            'save': SaveHandler,
+            'close': CloseHandler,
+            'win_exists': ExistsHandler,
+        }
+
+    def func(self, req):
+        args, kwargs = req['args'], req.get('kwargs', {})
+
+        args = (unpack_lua(a) for a in args)
+
+        for k in kwargs:
+            v = kwargs[k]
+            kwargs[k] = unpack_lua(v)
+
+        func = getattr(self.vis, req['func'])
+
+        return func(*args, **kwargs)
 
     def post(self):
-        args = tornado.escape.json_decode(tornado.escape.to_basestring(self.request.body))
+        req = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
 
-        ptype = args['data'][0]['type']
-        p = pane(args)
+        if req.get('func') is not None:
+            try:
+                req, endpoint = self.func(req)
+                if (endpoint != 'events'):
+                    # Process the request using the proper handler
+                    self.handlers[endpoint].wrap_func(self, req)
+                    return
+            except Exception:
+                # get traceback and send it back
+                print(traceback.format_exc())
+                return self.write(traceback.format_exc())
+
+        eid = extract_eid(req)
+        p = window(req)
+
+        register_window(self, p, eid)
+
+
+class ExistsHandler(BaseHandler):
+    def initialize(self, state, subs):
+        self.state = state
+        self.subs = subs
+
+    @staticmethod
+    def wrap_func(handler, args):
         eid = extract_eid(args)
 
-        if ptype in ['image', 'text']:
-            p.update(dict(content=args['data'][0]['content'], type=ptype))
+        if args['win'] in handler.state[eid]['jsons']:
+            handler.write('true')
         else:
-            p['content'] = dict(data=args['data'], layout=args['layout'])
-            p['type'] = 'plot'
+            handler.write('false')
 
-        register_pane(self, p, eid)
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
 
 
 class UpdateHandler(BaseHandler):
@@ -268,7 +351,9 @@ class UpdateHandler(BaseHandler):
         self.state = state
         self.subs = subs
 
-    def update(self, p, args):
+    # TODO remove when updateTrace is to be deprecated
+    @staticmethod
+    def update_updateTrace(p, args):
         pdata = p['content']['data']
 
         new_data = args['data']
@@ -302,25 +387,92 @@ class UpdateHandler(BaseHandler):
 
         return p
 
-    def post(self):
-        args = tornado.escape.json_decode(tornado.escape.to_basestring(self.request.body))
+    @staticmethod
+    def update(p, args):
+        # Update text in window, separated by a line break
+        if p['type'] == 'text':
+            p['content'] += "<br>" + args['data'][0]['content']
+            return p
+
+        pdata = p['content']['data']
+
+        new_data = args['data']
+        # TODO remove when updateTrace is deprecated
+        if isinstance(new_data, dict):
+            return UpdateHandler.update_updateTrace(p, args)
+        name = args.get('name')
+        append = args.get('append')
+
+        idxs = list(range(len(pdata)))
+
+        if name is not None:
+            assert len(new_data) == 1
+            idxs = [i for i in idxs if pdata[i]['name'] == name]
+
+        # inject new trace
+        if len(idxs) == 0:
+            idx = len(pdata)
+            pdata.append(dict(pdata[0]))   # plot is not empty, clone an entry
+            pdata[idx]['name'] = name
+            idxs = [idx]
+            append = False
+            pdata[idx] = new_data[0]
+            for k, v in new_data[0].items():
+                pdata[idx][k] = v
+            return p
+
+        for n, idx in enumerate(idxs):    # update traces
+            if all([math.isnan(i) or i is None for i in new_data[n]['x']]):
+                continue
+            # handle data for plotting
+            for axis in ['x', 'y']:
+                pdata[idx][axis] = (pdata[idx][axis] + new_data[n][axis]) \
+                    if append else new_data[n][axis]
+
+            # handle marker properties
+            if 'marker' not in new_data[n]:
+                continue
+            if 'marker' not in pdata[idx]:
+                pdata[idx]['marker'] = {}
+            pdata_marker = pdata[idx]['marker']
+            for marker_prop in ['color']:
+                if marker_prop not in new_data[n]['marker']:
+                    continue
+                if marker_prop not in pdata[idx]['marker']:
+                    pdata[idx]['marker'][marker_prop] = []
+                pdata_marker[marker_prop] = (
+                    pdata_marker[marker_prop] +
+                    new_data[n]['marker'][marker_prop]) if append else \
+                    new_data[n]['marker'][marker_prop]
+
+        return p
+
+    @staticmethod
+    def wrap_func(handler, args):
         eid = extract_eid(args)
 
-        if args['win'] not in self.state[eid]['jsons']:
-            self.write('win does not exist')
+        if args['win'] not in handler.state[eid]['jsons']:
+            handler.write('win does not exist')
             return
 
-        p = self.state[eid]['jsons'][args['win']]
+        p = handler.state[eid]['jsons'][args['win']]
 
-        if not p['content']['data'][0]['type'] == 'scatter':
-            self.write('win is not scatter')
+        if not (p['type'] == 'text' or
+                p['content']['data'][0]['type'] == 'scatter'):
+            handler.write('win is not scatter or text')
             return
 
-        p = self.update(p, args)
+        p = UpdateHandler.update(p, args)
 
         p['contentID'] = get_rand_id()
-        broadcast(self, p, eid)
-        self.write(p['id'])
+        broadcast(handler, p, eid)
+        handler.write(p['id'])
+
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
 
 
 class CloseHandler(BaseHandler):
@@ -328,18 +480,23 @@ class CloseHandler(BaseHandler):
         self.state = state
         self.subs = subs
 
-    def post(self):
-        args = tornado.escape.json_decode(tornado.escape.to_basestring(self.request.body))
-
+    @staticmethod
+    def wrap_func(handler, args):
         eid = extract_eid(args)
         win = args.get('win')
 
-        keys = list(self.state[eid]['jsons'].keys()) if win is None else [win]
+        keys = list(handler.state[eid]['jsons'].keys()) if win is None else [win]
         for win in keys:
-            self.state[eid]['jsons'].pop(win, None)
+            handler.state[eid]['jsons'].pop(win, None)
             broadcast(
-                self, json.dumps({'command': 'close', 'data': win}), eid
+                handler, json.dumps({'command': 'close', 'data': win}), eid
             )
+
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
 
 
 def load_env(state, eid, socket):
@@ -360,8 +517,8 @@ def load_env(state, eid, socket):
         )
 
     jsons = list(env.get('jsons', {}).values())
-    panes = sorted(jsons, key=lambda k: ('i' not in k, k.get('i', None)))
-    for v in panes:
+    windows = sorted(jsons, key=lambda k: ('i' not in k, k.get('i', None)))
+    for v in windows:
         socket.write_message(v)
 
     socket.write_message(json.dumps({'command': 'layout'}))
@@ -390,7 +547,9 @@ class EnvHandler(BaseHandler):
         )
 
     def post(self, args):
-        sid = tornado.escape.json_decode(tornado.escape.to_basestring(self.request.body))['sid']
+        sid = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )['sid']
         load_env(self.state, args, self.subs[sid])
 
 
@@ -399,15 +558,22 @@ class SaveHandler(BaseHandler):
         self.state = state
         self.subs = subs
 
-    def post(self):
-        envs = tornado.escape.json_decode(tornado.escape.to_basestring(self.request.body))['data']
+    @staticmethod
+    def wrap_func(handler, args):
+        envs = args['data']
         envs = [escape_eid(eid) for eid in envs]
-        ret = serialize_env(self.state, envs)  # this ignores invalid env ids
-        self.write(json.dumps(ret))
+        ret = serialize_env(handler.state, envs)  # this ignores invalid env ids
+        handler.write(json.dumps(ret))
+
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
 
 
 class IndexHandler(BaseHandler):
-    def initialize(self, state):
+    def initialize(self, state, subs):
         self.state = state
 
     def get(self, args, **kwargs):
@@ -455,8 +621,6 @@ def download_scripts(proxies=None, install_dir=None):
         '%scss/bootstrap.min.css' % bb: 'bootstrap.min.css',
         '%sfonts/glyphicons-halflings-regular.eot' % bb:
             'glyphicons-halflings-regular.eot',
-        '%sfonts/glyphicons-halflings-regular.eot?#iefix' % bb:
-            'glyphicons-halflings-regular.eot?#iefix',
         '%sfonts/glyphicons-halflings-regular.woff2' % bb:
             'glyphicons-halflings-regular.woff2',
         '%sfonts/glyphicons-halflings-regular.woff' % bb:
@@ -506,7 +670,7 @@ def download_scripts(proxies=None, install_dir=None):
                 with open(filename, 'wb') as fwrite:
                     fwrite.write(data)
             except (HTTPError, URLError) as exc:
-                print('Error {} while downloading {}'.format(exc.code, key))
+                logging.error('Error {} while downloading {}'.format(exc.code, key))
 
 
 def main():

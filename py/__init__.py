@@ -24,7 +24,12 @@ import numbers
 from six import string_types
 from six import BytesIO
 import logging
+import warnings
 
+try:
+    import torchfile
+except BaseException:
+    from . import torchfile
 
 logging.getLogger('requests').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
@@ -49,6 +54,19 @@ def nan2none(l):
     return l
 
 
+def from_t7(t, b64=False):
+    if b64:
+        t = base64.b64decode(t)
+
+    with open('/dev/shm/t7', 'w') as ff:
+        ff.write(t)
+        ff.close()
+
+    sf = open('/dev/shm/t7')
+
+    return torchfile.T7Reader(sf).read_obj()
+
+
 def loadfile(filename):
     assert os.path.isfile(filename), 'could not find file %s' % filename
     fileobj = open(filename, 'rb')
@@ -61,19 +79,19 @@ def loadfile(filename):
 def _scrub_dict(d):
     if type(d) is dict:
         return dict((k, _scrub_dict(v)) for k, v in list(d.items())
-                                        if v and _scrub_dict(v))
+                    if v is not None and _scrub_dict(v) is not None)
     else:
         return d
 
 
 def _axisformat(x, opts):
-    fields = ['type', 'tick', 'label', 'tickvals', 'ticklabels', 'tickmin', 'tickmax']
+    fields = ['type', 'tick', 'label', 'tickvals', 'ticklabels', 'tickmin', 'tickmax', 'tickfont']
     if any([opts.get(x + i) for i in fields]):
         return {
             'type': opts.get(x + 'type'),
             'title': opts.get(x + 'label'),
             'range': [opts.get(x + 'tickmin'), opts.get(x + 'tickmax')]
-            if (opts.get(x + 'tickmin') and opts.get(x + 'tickmax')) else None,
+            if (opts.get(x + 'tickmin') and opts.get(x + 'tickmax')) is not None else None,
             'tickvals': opts.get(x + 'tickvals'),
             'ticktext': opts.get(x + 'ticklabels'),
             'tickwidth': opts.get(x + 'tickstep'),
@@ -85,7 +103,7 @@ def _opts2layout(opts, is3d=False):
     layout = {
         'width': opts.get('width'),
         'height': opts.get('height'),
-        'showlegend': opts.get('legend', False),
+        'showlegend': opts.get('showlegend', 'legend' in opts),
         'title': opts.get('title'),
         'xaxis': _axisformat('x', opts),
         'yaxis': _axisformat('y', opts),
@@ -121,9 +139,10 @@ def _markerColorCheck(mc, X, Y, L):
     mc = np.uint8(mc)
 
     if mc.ndim == 1:
-        markercolor = mc.tolist()
+        markercolor = ['rgba(0, 0, 255, %s)' % (mc[i] / 255.)
+                       for i in range(len(mc))]
     else:
-        markercolor = ['#%x%x%x' % (i[0], i[1], i[2]) for i in mc]
+        markercolor = ['#%02x%02x%02x' % (i[0], i[1], i[2]) for i in mc]
 
     if mc.shape[0] != X.shape[0]:
         markercolor = [markercolor[Y[i] - 1] for i in range(Y.shape[0])]
@@ -181,8 +200,7 @@ def _assert_opts(opts):
 
 def pytorch_wrap(fn):
     def result(*args, **kwargs):
-        args = (a.cpu().numpy() if type(a).__module__ == 'torch' else a
-                for a in args)
+        args = (a.cpu().numpy() if type(a).__module__ == 'torch' else a for a in args)
 
         for k in kwargs:
             if type(kwargs[k]).__module__ == 'torch':
@@ -210,6 +228,7 @@ class Visdom(object):
         ipv6=True,
         proxy=None,
         env='main',
+        send=True,
     ):
         self.server = server
         self.endpoint = endpoint
@@ -217,6 +236,7 @@ class Visdom(object):
         self.ipv6 = ipv6
         self.proxy = proxy
         self.env = env              # default env
+        self.send = send
 
         try:
             import torch
@@ -234,6 +254,9 @@ class Visdom(object):
         """
         if msg.get('eid', None) is None:
             msg['eid'] = self.env
+
+        if not self.send:
+            return msg, endpoint
 
         try:
             r = requests.post(
@@ -272,9 +295,43 @@ class Visdom(object):
             endpoint='close'
         )
 
+    def _win_exists_wrap(self, win, env=None):
+        """
+        This function returns a string indicating whether
+        or not a window exists on the server already. ['true' or 'false']
+        Returns False if something went wrong
+        """
+        assert win is not None
+
+        return self._send({
+            'win': win,
+            'eid': env,
+        }, endpoint='win_exists')
+
+    def win_exists(self, win, env=None):
+        """
+        This function returns a bool indicating whether
+        or not a window exists on the server already.
+        Returns None if something went wrong
+        """
+        e = self._win_exists_wrap(win, env)
+        if e == 'true':
+            return True
+        elif e == 'false':
+            return False
+        else:
+            return None
+
+    def check_connection(self):
+        """
+        This function returns a bool indicating whether or
+        not the server is connected.
+        """
+        return self.win_exists('') is not None
+
     # Content
 
-    def text(self, text, win=None, env=None, opts=None):
+    def text(self, text, win=None, env=None, opts=None, append=False):
         """
         This function prints text in a box. It takes as input an `text` string.
         No specific `opts` are currently supported.
@@ -283,12 +340,17 @@ class Visdom(object):
         _assert_opts(opts)
         data = [{'content': text, 'type': 'text'}]
 
+        if append:
+            endpoint = 'update'
+        else:
+            endpoint = 'events'
+
         return self._send({
             'data': data,
             'win': win,
             'eid': env,
-            'opts': opts
-        })
+            'opts': opts,
+        }, endpoint=endpoint)
 
     def svg(self, svgstr=None, svgfile=None, win=None, env=None, opts=None):
         """
@@ -460,6 +522,11 @@ class Visdom(object):
         There are less options because they are assumed to inherited from the
         specified plot.
         """
+        warnings.warn("updateTrace is going to be deprecated in the next "
+                      "version of `visdom`. Please to use `scatter(.., "
+                      "update='append',name=<traceName>)` or `line(.., "
+                      "update='append',name=<traceName>)` as required.",
+                      PendingDeprecationWarning)
         assert win is not None
 
         assert Y.shape == X.shape, 'Y should be same size as X'
@@ -471,6 +538,11 @@ class Visdom(object):
         if name:
             assert len(name) >= 0, 'name of trace should be nonempty string'
             assert X.ndim == 1, 'updating by name expects 1-dim data'
+
+        if opts is not None and opts.get('markercolor') is not None:
+            K = int(Y.max())
+            opts['markercolor'] = _markerColorCheck(
+                opts['markercolor'], X, Y, K)
 
         data = {'x': X.transpose().tolist(), 'y': Y.transpose().tolist()}
         if X.ndim == 1:
@@ -486,7 +558,8 @@ class Visdom(object):
             'opts': opts,
         }, endpoint='update')
 
-    def scatter(self, X, Y=None, win=None, env=None, opts=None, update=None):
+    def scatter(self, X, Y=None, win=None, env=None, opts=None, update=None,
+                name=None):
         """
         This function draws a 2D or 3D scatter plot. It takes in an `Nx2` or
         `Nx3` tensor `X` that specifies the locations of the `N` points in the
@@ -494,8 +567,9 @@ class Visdom(object):
         range between `1` and `K` can be specified as well -- the labels will be
         reflected in the colors of the markers.
 
-        `update` can be used to efficiently update the data of an existing line.
-        Use 'append' to append data, 'replace' to use new data.
+        `update` can be used to efficiently update the data of an existing plot.
+        Use 'append' to append data, 'replace' to use new data. If updating a
+        single trace, use `name` to specify the name of the trace to be updated.
         Update data that is all NaN is ignored (can be used for masking update).
 
         The following `opts` are supported:
@@ -507,8 +581,22 @@ class Visdom(object):
         - `opts.legend`      : `table` containing legend names
         """
         if update is not None:
-            return self.updateTrace(X=X, Y=Y, win=win, env=env,
-                                    append=update == 'append', opts=opts)
+            assert win is not None
+
+            # case when X is 1 dimensional and corresponding values on y-axis
+            # are passed in parameter Y
+            if name:
+                assert len(name) >= 0, \
+                    'name of trace should be non-empty string'
+                assert X.ndim == 1 or X.ndim == 2, 'updating by name should' \
+                    'have 1-dim or 2-dim X.'
+                if X.ndim == 1:
+                    assert Y.ndim == 1, \
+                        'update by name should have 1-dim Y when X is 1-dim'
+                    assert X.shape[0] == Y.shape[0], \
+                        'X and Y should have same shape'
+                    X = np.column_stack((X, Y))
+                    Y = None
 
         assert X.ndim == 2, 'X should have two dims'
         assert X.shape[1] == 2 or X.shape[1] == 3, 'X should have 2 or 3 cols'
@@ -518,7 +606,7 @@ class Visdom(object):
             assert Y.ndim == 1, 'Y should be one-dimensional'
             assert X.shape[0] == Y.shape[0], 'sizes of X and Y should match'
         else:
-            Y = np.ones(X.shape[0])
+            Y = np.ones(X.shape[0], dtype=int)
 
         assert np.equal(np.mod(Y, 1), 0).all(), 'labels should be integers'
         assert Y.min() == 1, 'labels are assumed to be between 1 and K'
@@ -549,8 +637,8 @@ class Visdom(object):
                 _data = {
                     'x': nan2none(X.take(0, 1)[ind].tolist()),
                     'y': nan2none(X.take(1, 1)[ind].tolist()),
-                    'name': opts.get('legend') and
-                    opts.get('legend')[k - 1] or str(k),
+                    'name': opts.get('legend')[k - 1] if 'legend' in opts
+                    else str(k),
                     'type': 'scatter3d' if is3d else 'scatter',
                     'mode': opts.get('mode'),
                     'marker': {
@@ -571,15 +659,28 @@ class Visdom(object):
 
                 data.append(_scrub_dict(_data))
 
-        return self._send({
+        if opts:
+            for marker_prop in ['markercolor']:
+                if marker_prop in opts:
+                    del opts[marker_prop]
+
+        data_to_send = {
             'data': data,
             'win': win,
             'eid': env,
             'layout': _opts2layout(opts, is3d),
             'opts': opts,
-        })
+        }
+        endpoint = 'events'
+        if update:
+            data_to_send['name'] = name
+            data_to_send['append'] = update == 'append'
+            endpoint = 'update'
 
-    def line(self, Y, X=None, win=None, env=None, opts=None, update=None):
+        return self._send(data_to_send, endpoint=endpoint)
+
+    def line(self, Y, X=None, win=None, env=None, opts=None, update=None,
+             name=None):
         """
         This function draws a line plot. It takes in an `N` or `NxM` tensor
         `Y` that specifies the values of the `M` lines (that connect `N` points)
@@ -588,7 +689,8 @@ class Visdom(object):
         lines will share the same x-axis values) or have the same size as `Y`.
 
         `update` can be used to efficiently update the data of an existing line.
-        Use 'append' to append data, 'replace' to use new data.
+        Use 'append' to append data, 'replace' to use new data. If updating a
+        single trace, use `name` to specify the name of the trace to be updated.
         Update data that is all NaN is ignored (can be used for masking update).
 
         The following `opts` are supported:
@@ -605,8 +707,6 @@ class Visdom(object):
         """
         if update is not None:
             assert X is not None, 'must specify x-values for line update'
-            return self.updateTrace(X=X, Y=Y, win=win, env=env,
-                                    append=update == 'append', opts=opts)
         assert Y.ndim == 1 or Y.ndim == 2, 'Y should have 1 or 2 dim'
 
         if X is not None:
@@ -636,7 +736,8 @@ class Visdom(object):
             labels = np.arange(1, Y.shape[1] + 1)
             labels = np.tile(labels, (Y.shape[0], 1)).ravel(order='F')
 
-        return self.scatter(X=linedata, Y=labels, opts=opts, win=win, env=env)
+        return self.scatter(X=linedata, Y=labels, opts=opts, win=win, env=env,
+                            update=update, name=name)
 
     def heatmap(self, X, win=None, env=None, opts=None):
         """
@@ -821,7 +922,7 @@ class Visdom(object):
         This function draws a surface plot. It takes as input an `NxM` tensor
         `X` that specifies the value at each location in the surface plot.
 
-        `stype` is 'contour' (2D) or 'surf' (3D).
+        `stype` is 'contour' (2D) or 'surface' (3D).
 
         The following `opts` are supported:
 
@@ -829,7 +930,6 @@ class Visdom(object):
         - `opts.xmin`    : clip minimum value (`number`; default = `X:min()`)
         - `opts.xmax`    : clip maximum value (`number`; default = `X:max()`)
         """
-
         X = np.squeeze(X)
         assert X.ndim == 2, 'X should be two-dimensional'
 
@@ -861,8 +961,6 @@ class Visdom(object):
         This function draws a surface plot. It takes as input an `NxM` tensor
         `X` that specifies the value at each location in the surface plot.
 
-        `stype` is 'contour' (2D) or 'surf' (3D).
-
         The following `opts` are supported:
 
         - `opts.colormap`: colormap (`string`; default = `'Viridis'`)
@@ -870,7 +968,7 @@ class Visdom(object):
         - `opts.xmax`    : clip maximum value (`number`; default = `X:max()`)
         """
 
-        self._surface(X=X, stype='surface', opts=opts, win=win, env=env)
+        return self._surface(X=X, stype='surface', opts=opts, win=win, env=env)
 
     def contour(self, X, win=None, env=None, opts=None):
         """
@@ -884,7 +982,89 @@ class Visdom(object):
         - `opts.xmax`    : clip maximum value (`number`; default = `X:max()`)
         """
 
-        self._surface(X=X, stype='contour', opts=opts, win=win, env=env)
+        return self._surface(X=X, stype='contour', opts=opts, win=win, env=env)
+
+    def quiver(self, X, Y, gridX=None, gridY=None,
+                            win=None, env=None, opts=None):
+        """
+        This function draws a quiver plot in which the direction and length of the
+        arrows is determined by the `NxM` tensors `X` and `Y`. Two optional `NxM`
+        tensors `gridX` and `gridY` can be provided that specify the offsets of
+        the arrows; by default, the arrows will be done on a regular grid.
+
+        The following `options` are supported:
+
+        - `options.normalize`:  length of longest arrows (`number`)
+        - `options.arrowheads`: show arrow heads (`boolean`; default = `true`)
+        """
+
+        # assertions:
+        assert X.ndim == 2, 'X should be two-dimensional'
+        assert Y.ndim == 2, 'Y should be two-dimensional'
+        assert Y.shape == X.shape, 'X and Y should have the same size'
+
+        # make sure we have a grid:
+        N, M = X.shape[0], X.shape[1]
+        if gridX is None:
+            gridX = np.broadcast_to(np.expand_dims(np.arange(0, N), axis=1), (N, M))
+        if gridY is None:
+            gridY = np.broadcast_to(np.expand_dims(np.arange(0, M), axis=0), (N, M))
+        assert gridX.shape == X.shape, 'X and gridX should have the same size'
+        assert gridY.shape == Y.shape, 'Y and gridY should have the same size'
+
+        # default options:
+        opts = {} if opts is None else opts
+        opts['mode'] = 'lines'
+        opts['arrowheads'] = opts.get('arrowheads', True)
+        _assert_opts(opts)
+
+        # normalize vectors to unit length:
+        if opts.get('normalize', False):
+            assert isinstance(opts['normalize'], numbers.Number) and \
+                opts['normalize'] > 0, \
+                'opts.normalize should be positive number'
+            magnitude = np.sqrt(np.add(np.multiply(X, X),
+                                       np.multiply(Y, Y))).max()
+            X = X / (magnitude / opts['normalize'])
+            Y = Y / (magnitude / opts['normalize'])
+
+        # interleave X and Y with copies / NaNs to get lines:
+        nans = np.full((X.shape[0], X.shape[1]), np.nan).flatten()
+        tipX = gridX + X
+        tipY = gridY + Y
+        dX = np.column_stack((gridX.flatten(), tipX.flatten(), nans))
+        dY = np.column_stack((gridY.flatten(), tipY.flatten(), nans))
+
+        # convert data to scatter plot format:
+        dX = np.resize(dX, (dX.shape[0] * 3, 1))
+        dY = np.resize(dY, (dY.shape[0] * 3, 1))
+        data = np.column_stack((dX.flatten(), dY.flatten()))
+
+        # add arrow heads:
+        if opts['arrowheads']:
+
+            # compute tip points:
+            alpha = 0.33  # size of arrow head relative to vector length
+            beta = 0.33   # width of the base of the arrow head
+            Xbeta = (X + 1e-5) * beta
+            Ybeta = (Y + 1e-5) * beta
+            lX = np.add(-alpha * np.add(X, Ybeta), tipX)
+            rX = np.add(-alpha * np.add(X, -Ybeta), tipX)
+            lY = np.add(-alpha * np.add(Y, -Xbeta), tipY)
+            rY = np.add(-alpha * np.add(Y, Xbeta), tipY)
+
+            # add to data:
+            hX = np.column_stack((lX.flatten(), tipX.flatten(),
+                                  rX.flatten(), nans))
+            hY = np.column_stack((lY.flatten(), tipY.flatten(),
+                                  rY.flatten(), nans))
+            hX = np.resize(hX, (hX.shape[0] * 4, 1))
+            hY = np.resize(hY, (hY.shape[0] * 4, 1))
+            data = np.concatenate((data, np.column_stack(
+                (hX.flatten(), hY.flatten()))), axis=0)
+
+        # generate scatter plot:
+        return self.scatter(X=data, opts=opts, win=win, env=env)
 
     def quiver(self, X, Y, gridX=None, gridY=None,
                             win=None, env=None, opts=None):

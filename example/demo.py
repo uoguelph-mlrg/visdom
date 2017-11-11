@@ -19,7 +19,13 @@ from six.moves import urllib
 
 viz = Visdom()
 
+assert viz.check_connection()
+
 textwindow = viz.text('Hello World!')
+
+updatetextwindow = viz.text('Hello World! More text should be here')
+assert updatetextwindow is not None, 'Window was none'
+viz.text('And here it is', win=updatetextwindow, append=True)
 
 # video demo:
 try:
@@ -112,12 +118,16 @@ win = viz.scatter(
     ),
 )
 
+# assert that the window exists
+assert viz.win_exists(win)
+
 # add new trace to scatter plot
-viz.updateTrace(
+viz.scatter(
     X=np.random.rand(255),
     Y=np.random.rand(255),
     win=win,
     name='new_trace',
+    update='new'
 )
 
 
@@ -162,7 +172,7 @@ viz.contour(X=X, opts=dict(colormap='Viridis'))
 viz.surf(X=X, opts=dict(colormap='Hot'))
 
 # line plots
-viz.line(Y=np.random.rand(10))
+viz.line(Y=np.random.rand(10), opts=dict(showlegend=True))
 
 Y = np.linspace(-5, 5, 100)
 viz.line(
@@ -182,17 +192,19 @@ viz.line(
     win=win,
     update='append'
 )
-viz.updateTrace(
+viz.line(
     X=np.arange(21, 30),
     Y=np.arange(1, 10),
     win=win,
-    name='2'
+    name='2',
+    update='append'
 )
-viz.updateTrace(
+viz.line(
     X=np.arange(1, 10),
     Y=np.arange(11, 20),
     win=win,
-    name='4'
+    name='4',
+    update='append'
 )
 
 Y = np.linspace(0, 4, 200)
@@ -201,7 +213,7 @@ win = viz.line(
     X=np.column_stack((Y, Y)),
     opts=dict(
         fillarea=True,
-        legend=False,
+        showlegend=False,
         width=400,
         height=400,
         xlabel='Time',
@@ -252,6 +264,41 @@ viz.pie(
     opts=dict(legend=['Residential', 'Non-Residential', 'Utility'])
 )
 
+# scatter plot example with various type of updates
+colors = np.random.randint(0, 255, (2, 3,))
+win = viz.scatter(
+    X=np.random.rand(255, 2),
+    Y=(np.random.rand(255) + 1.5).astype(int),
+    opts=dict(
+        markersize=10,
+        markercolor=colors,
+        legend=['1', '2']
+    ),
+)
+
+viz.scatter(
+    X=np.random.rand(255),
+    Y=np.random.rand(255),
+    opts=dict(
+        markersize=10,
+        markercolor=colors[0].reshape(-1, 3),
+
+    ),
+    name='1',
+    update='append',
+    win=win)
+
+viz.scatter(
+    X=np.random.rand(255, 2),
+    Y=(np.random.rand(255) + 1.5).astype(int),
+    opts=dict(
+        markersize=10,
+        markercolor=colors,
+    ),
+    update='append',
+    win=win)
+
+
 # mesh plot
 x = [0, 0, 1, 1, 0, 0, 1, 1]
 y = [0, 1, 1, 0, 0, 1, 1, 0]
@@ -278,6 +325,17 @@ viz.svg(
 
 # close text window:
 viz.close(win=textwindow)
+
+# assert that the closed window doesn't exist
+assert not viz.win_exists(textwindow)
+
+# Arbitrary visdom content
+trace = dict(x=[1, 2, 3], y=[4, 5, 6], mode="markers+lines", type='custom',
+             marker={'color': 'red', 'symbol': 104, 'size': "10"},
+             text=["one", "two", "three"], name='1st Trace')
+layout = dict(title="First Plot", xaxis={'title': 'x1'}, yaxis={'title': 'x2'})
+
+viz._send({'data': [trace], 'layout': layout, 'win': 'mywin'})
 
 # PyTorch tensor
 try:
