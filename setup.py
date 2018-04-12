@@ -3,21 +3,23 @@ from setuptools import setup
 readme = open('README.md').read()
 
 requirements = [
-    'numpy',
+    'numpy>=1.8',
+    'scipy',
     'pillow',
     'requests',
     'tornado',
     'pyzmq',
     'six',
     'torchfile',
+    'websocket-client',
 ]
 
 setup(
     # Metadata
     name='visdom',
-    version='0.1.6.2',
-    author='Allan Jabri',
-    author_email='ajabri@fb.com',
+    version='0.1.7.2',
+    author='Allan Jabri, Jack Urbanek, Laurens van der Maaten',
+    author_email='jju@fb.com',
     url='https://github.com/facebookresearch/visdom',
     description='A tool for visualizing live, rich data for Torch and Numpy',
     long_description=readme,

@@ -242,6 +242,27 @@ M.win_exists = argcheck{
    end
 }
 
+-- get data from an existing window
+M.get_window_data = argcheck{
+   doc = [[
+      This function returns all the window data for a specified window in
+      an environment. Use win=None to get all the windows in the given
+      environment. Env defaults to main
+   ]],
+   {name = 'self', type = 'visdom.client'},
+   {name = 'win',  type = 'string', opt = true},
+   {name = 'env',  type = 'string', opt = true},
+   call = function(self, win, env)
+      local args = {}
+      local kwargs = {win = win, env = env}
+      return self:py_func{
+         func = 'get_window_data',
+         args = args,
+         kwargs = kwargs,
+      }
+   end
+}
+
 -- check_connection
 M.check_connection = argcheck{
    doc = [[
@@ -255,6 +276,22 @@ M.check_connection = argcheck{
       else
          return false
       end
+   end
+}
+
+M.update_window_opts = argcheck{
+   doc = [[
+      This function allows pushing new options to an existing plot window
+      without updating the content
+   ]],
+   {name = 'self',  type = 'visdom.client'},
+   {name = 'win',   type = 'string'},
+   {name = 'opts',  type = 'table'},
+   {name = 'env',   type = 'string',        opt = true},
+   call = function(self, win, opts, env)
+      local args = {win, opts}
+      local kwargs = {env = env}
+      return self:py_func{func = 'update_window_opts', args = args, kwargs = kwargs}
    end
 }
 
@@ -309,7 +346,9 @@ M.scatter = argcheck{
       reflected in the colors of the markers.
 
       `update` can be used to efficiently update the data of an existing line.
-      Use 'append' to append data, 'replace' to use new data, or nil otherwise.
+      Use 'append' to append data, 'replace' to use new data, 'remove' to delete
+      the trace specified in `name` or nil otherwise.
+      Use `name` if you want to update a specific trace.
       Update data that is all NaN is ignored (can be used for masking updates).
 
       The following `options` are supported:
@@ -319,6 +358,7 @@ M.scatter = argcheck{
        - `options.markersize`  : marker size (`number`; default = `'10'`)
        - `options.markercolor` : marker color (`torch.*Tensor`; default = `nil`)
        - `options.legend`      : `table` containing legend names
+       - `opts.textlabels`    : text label for each point (table: default = `nil`)
    ]],
    noordered = true,
    {name = 'self',    type = 'visdom.client'},
@@ -329,6 +369,7 @@ M.scatter = argcheck{
    {name = 'win',     type = 'string',        opt = true},
    {name = 'env',     type = 'string',        opt = true},
    {name = 'update',  type = 'string',        opt = true},
+   {name = 'name',    type = 'string',        opt = true},
    call = function(self, X, Y, opts, options, win, env, update)
       if options then
          print(
@@ -343,7 +384,8 @@ M.scatter = argcheck{
          win = win,
          env = env,
          opts = opts,
-         update = update
+         update = update,
+         name = name
       }
       return self:py_func{func = 'scatter', args = args, kwargs = kwargs}
    end
@@ -359,7 +401,9 @@ M.line = argcheck{
       lines will share the same x-axis values) or have the same size as `Y`.
 
       `update` can be used to efficiently update the data of an existing line.
-      Use 'append' to append data, 'replace' to use new data, or nil otherwise.
+      Use 'append' to append data, 'replace' to use new data, 'remove' to delete
+      the trace specified in `name` or nil otherwise.
+      Use `name` if you want to update a specific trace.
       Update data that is all NaN is ignored (can be used for masking updates).
 
       The following `options` are supported:
@@ -379,6 +423,7 @@ M.line = argcheck{
    {name = 'win',     type = 'string',        opt = true},
    {name = 'env',     type = 'string',        opt = true},
    {name = 'update',  type = 'string',        opt = true},
+   {name = 'name',    type = 'string',        opt = true},
    call = function(self, Y, X, opts, options, win, env, update)
       if options then
          print(
@@ -388,7 +433,14 @@ M.line = argcheck{
       end
       opts = opts or options or {}
       local args = {Y}
-      local kwargs = {X = X, win = win, env = env, opts = opts, update = update}
+      local kwargs = {
+         X = X,
+         win = win,
+         env = env,
+         opts = opts,
+         update = update,
+         name = name
+      }
       return self:py_func{func = 'line', args = args, kwargs = kwargs}
    end
 }
@@ -845,12 +897,55 @@ M.svg = argcheck{
    end
 }
 
+-- audio file:
+M.audio = argcheck{
+   doc = [[
+   This function plays audio. It takes as input the filename of the audio
+   file or an `N` tensor containing the waveform (use an `Nx2` matrix for
+   stereo audio). The function does not support any plot-specific `opts`.
+
+   The following `opts` are supported:
+
+   - `opts.sample_frequency`: sample frequency (int > 0; default = 44100)
+   ]],
+   noordered = true,
+   {name = 'self',      type = 'visdom.client'},
+   {name = 'tensor',    type = 'torch.*Tensor', opt = true},
+   {name = 'audiofile', type = 'string', opt = true},
+   {name = 'opts',      type = 'table',  opt = true},
+   {name = 'options',   type = 'table',  opt = true},
+   {name = 'win',       type = 'string', opt = true},
+   {name = 'env',       type = 'string', opt = true},
+   call = function(self, tensor, audiofile, opts, options, win, env)
+      if options then
+         print(
+            [[WARNING: Argument `options` is deprecated and will soon be
+            removed. Use argument `opts` instead.]]
+         )
+      end
+      opts = opts or options or {}
+      local args = {}
+      local kwargs = {
+         tensor = tensor,
+         audiofile = audiofile,
+         win = win,
+         env = env,
+         opts = opts,
+      }
+      return self:py_func{func = 'audio', args = args, kwargs = kwargs}
+   end
+}
+
 -- video file:
 M.video = argcheck{
    doc = [[
       This function plays a video. It takes as input the filename of the video
       or a `LxCxHxW` tensor containing all the frames of the video. The function
-      does not support any plot-specific `options`.
+      does not support any plot-specific `opts`.
+
+      The following `opts` are supported:
+
+      - `opts.fps`: FPS for the video (`integer` > 0; default = 25)
    ]],
    noordered = true,
    {name = 'self',      type = 'visdom.client'},
@@ -922,6 +1017,21 @@ M.close = argcheck{
       local args = {}
       local kwargs = {win = win, env = env}
       return self:py_func{func = 'close', args = args, kwargs = kwargs}
+   end
+}
+
+-- delete an environment:
+M.delete_env = argcheck{
+   doc = [[
+      This function deletes a specific environment.
+   ]],
+   noordered = true,
+   {name = 'self', type = 'visdom.client'},
+   {name = 'env',  type = 'string'},
+   call = function(self, win, env)
+      local args = {env}
+      local kwargs = {}
+      return self:py_func{func = 'delete_env', args = args, kwargs = kwargs}
    end
 }
 

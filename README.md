@@ -35,7 +35,7 @@ Organize your visualization space programmatically or through the UI to create d
 ## Concepts
 Visdom has a simple set of features that can be composed for various use-cases.
 
-#### Panes
+### Windows
 <p align="center"><img align="center" src="https://lh3.googleusercontent.com/-kLnogsg9RCs/WLx34PEsGWI/AAAAAAAAnSs/7t_62pbfmfoEBnkcbKTXIqz0WM8pQJHVQCLcB/s0/Screen+Shot+2017-03-05+at+3.34.43+PM.png" width="500" /></p>
 
 
@@ -45,19 +45,56 @@ The UI begins as a blank slate -- you can populate it with plots, images, and te
 
 > **Tip**: You can use the zoom of your browser to adjust the scale of the UI.
 
+##### Callbacks
 
+The python Visdom implementation supports callbacks on a window. The demo shows an example of this in the form of an editable text pad. The functionality of these callbacks allows the Visdom object to receive and react to events that happen in the frontend.
 
-#### Environments
-<p align="center"><img align="center" src="https://lh3.googleusercontent.com/-1wRSpNIoFeo/WLXacodRTMI/AAAAAAAAnEo/sTr5jSnQviA0uLqFIvwPGledmxcpupdkgCLcB/s0/Screen+Shot+2017-02-28+at+2.54.13+PM.png" width="300" /></p>
+You can subscribe a window to events by adding a function to the event handlers dict for the window id you want to subscribe by calling `viz.register_event_handler(handler, win_id)` with your handler and the window id. Multiple handlers can be registered to the same window. You can remove all event handlers from a window using `viz.clear_event_handlers(win_id)`. When an event occurs to that window, your callbacks will be called on a dict containing:
 
-You can partition your visualization space with `envs`. By default, every user will have an env called `main`. New envs can be created in the UI or programmatically. The state of envs is chronically saved.
+ - `event_type`: one of the below event types
+ - `pane_data`: all of the stored contents for that window including layout and content.
+ - `eid`: the current environment id
+ - `target`: the window id the event is called on
+
+Additional parameters are defined below.
+
+Right now two callback events are supported:
+
+1. `Close` - Triggers when a window is closed. Returns a dict with only the aforementioned fields.
+2. `KeyPress` - Triggers when a key is pressed. Contains additional parameters:
+    - `key` - A string representation of the key pressed (applying state modifiers such as SHIFT)
+    - `key_code` - The javascript event keycode for the pressed key (no modifiers)
+
+### Environments
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34618198-fc63976c-f20b-11e7-9c0d-060132fdb37e.png" width="300" /></p>
+
+You can partition your visualization space with `envs`. By default, every user will have an env called `main`. New envs can be created in the UI or programmatically. The state of envs is chronically saved. Environments are able to keep entirely different pools of plots.
 
 You can access a specific env via url: `http://localhost.com:8097/env/main`. If your server is hosted, you can share this url so others can see your visualizations too.
 
->**Managing Envs:**
->Your envs are loaded at initialization of the server, by default from `$HOME/.visdom/`. Custom paths can be passed as a cmd-line argument. Envs are removed by deleting the corresponding `.json` file from the env dir.
+Environments are automatically hierarchically organized by the first `_`. 
 
-#### State
+#### Selecting Environments
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34618242-261d55d4-f20c-11e7-820d-c16731248b26.png" width="300" /></p>
+
+From the main page it is possible to toggle between different environments using the environment selector. Selecting a new environment will query the server for the plots that exist in that environment. The environment selector allows for searching and filtering for the new enironment.
+
+#### Comparing Environments
+
+From the main page it is possible to compare different environments using the environment selector. Selecting multiple environments in the check box will query the server for the plots with the same titles in all environments and plot them in a single plot. An additional compare legend pane is created with a number corresponding to each selected environment. Individual plots are updated with legends corresponding to "x_name" where `x` is a number corresponding with the compare legend pane and `name` is the original name in the legend.
+
+#### Clearing Environments
+You can use the eraser button to remove all of the current contents of an environment. This closes the plot windows for that environment but keeps the empty environment for new plots.
+
+#### Managing Environments
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34618262-3bb635c8-f20c-11e7-9370-9facfde0cfb7.png" width="400" /></p>
+
+Pressing the folder icon opens a dialog that allows you to fork or force save the current environment, or delete any of your existing environments. Use of this feature is fully described in the **State** section.
+
+>**Env Files:**
+>Your envs are loaded at initialization of the server, by default from `$HOME/.visdom/`. Custom paths can be passed as a cmd-line argument. Envs are removed by using the delete button or by deleting the corresponding `.json` file from the env dir.
+
+### State
 Once you've created a few visualizations, state is maintained. The server automatically caches your visualizations -- if you reload the page, your visualizations reappear.
 
 <p align="center"><img align="center" src="https://lh3.googleusercontent.com/-ZKeFJfMe5S4/WLXebiNgFwI/AAAAAAAAnFI/AH2cGsf40hEWbH6UeclYQcZPS0YZbcayQCLcB/s0/env_fork_2.gif" width="400" /></p>
@@ -68,21 +105,47 @@ Once you've created a few visualizations, state is maintained. The server automa
 
 * **Fork:** If you enter a new env name, saving will create a new env -- effectively **forking** the previous env.
 
-#### Filter
+> **Tip**: Fork an environment before you begin to make edits to ensure that your changes are saved seperately.
+
+### Filter
 You can use the `filter` to dynamically sift through windows present in an env -- just provide a regular expression with which to match titles of window you want to show. This can be helpful in use cases involving an env with many windows e.g. when systematically checking experimental results.
 
-<p align="center"><img align="center" src="https://lh3.googleusercontent.com/SJEoacYeHkVer5PEpYlJGOSdFX2gt2_GAVsTpg4k2Wea-RxoJ9e3zW_6xqq2g4WWV-JaIaMOLopAvssYgV2XqshhttRacNgRZQKfrreKOJls1RmwtLsA-SauhPPCKosUveab8dJmv7jQZ40sBLJZUXUXa5daCF16DQn7MtxpctP5Wx2MoOJI56DokT6KUj_Pl3I5M5N_y_kDt6f1pOl1FYjHCzV5no58OXHlyqVapLriX8MbfuZ2CWw6ZFY-XNlv5Cja8R9fKOt1956JVGcqo1u7OVM80eevhT69wUS97fw98UGklPhKwrxCgiGvwu_td__8YALleplfgILOR-_9aNMkNM1pnbZ9isHYGLGpBCOV2PnLdxqDcbjM0ojVzh5DLVBJbV3v2WAlbbCztktd5Kk6O5tWRN3tO4uH-Lm80mWJ-6dWip1Lj4qHWOvlCa0Tg6T_s9GY9zEule32knQdYmY7EmoJKpFFOhZuvX9GXWwz3Pu2nnYIzyaXGAax3qQhbEcPY_4zx20nHY2r5clKPAtyDt3unf7yg0Bk8kJb7bZj8BqdL-eof891vJttbiHXz37Dmpr3Qh1r2-AFr72mtafp-kNmPDjkEaxxRkHpQP03MSN2iGlfDC7OY7bsxmGwE-oJKfi59o6MfJcR3HMiNfsx7ARe0u6mujHj6EIl9n8=w373-h185-no" width="300" /></p>
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34618118-b86cb138-f20b-11e7-834d-b7d7039313f0.png" width="300" /></p>
 
+> **Note**: If you have saved your current view, the view will be restored after clearing the filter.
+> <p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34849912-f0693f30-f6f1-11e7-90b6-2a39f83280e8.gif" width="500" /></p>
+
+### Views
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34618173-e2546f40-f20b-11e7-9969-16267891fb53.png" width="300" /></p>
+
+It is possible to manage the views simply by dragging the tops of windows around, however additional features exist to keep views organized and save common views. View management can be useful for saving and switching between multiple common organizations of your windows.
+
+#### Saving/Deleting Views
+Using the folder icon, a dialog window opens where views can be forked in the same way that envs can be. Saving a view will retain the position and sizes of all of the windows in a given environment. Views are saved in `$HOME/.visdom/view/layouts.json` in the visdom filepath.
+
+> **Note**: Saved views are static, and editing a saved view copies that view over to the `current` view where editing can occur.
+
+#### Re-Packing
+Using the repack icon (9 boxes), visdom will attempt to pack your windows in a way that they best fit while retaining row/column ordering.
+
+> **Note**: Due to the reliance on row/column ordering and `ReactGridLayout` the final layout might be slightly different than what might be expected. We're working on improving that experience or providing alternatives that give more fine-tuned control.
+
+#### Reloading Views
+<p align="center"><img align="center" src="https://user-images.githubusercontent.com/1276867/34621042-9c6c05f6-f215-11e7-92c7-60afe2bf7e1e.gif" width="600" /></p>
+
+Using the view dropdown it is possible to select previously saved views, restoring the locations and sizes of all of the windows within the current environment to the places they were when that view was saved last.
 
 ## Setup
 
 Requires Python 2.7/3 (and optionally Torch7)
 
 ```bash
-# Install Python server and client
+# Install Python server and client from pip
+# (STABLE VERSION, NOT ALL CURRENT FEATURES ARE SUPPORTED)
 pip install visdom
 
 # Install Torch client
+# (STABLE VERSION, NOT ALL CURRENT FEATURES ARE SUPPORTED)
 luarocks install visdom
 
 ```
@@ -110,6 +173,15 @@ Visdom now can be accessed by going to `http://localhost:8097` in your browser, 
 
 >If the above does not work, try using an SSH tunnel to your server by adding the following line to your local  `~/.ssh/config`:
 ```LocalForward 127.0.0.1:8097 127.0.0.1:8097```.
+
+#### Command Line Options
+
+The following options can be provided to the server:
+
+1. `-port` : The port to run the server on.
+2. `-env_path` : The path to the serialized session to reload.
+3. `-logging_level` : Logging level (default = INFO). Accepts both standard text and numeric logging values.
+
 
 #### Python example
 ```python
@@ -154,8 +226,10 @@ Visdom offers the following basic visualization functions:
 - [`vis.image`](#visimage)    : image
 - [`vis.images`](#visimages)   : list of images
 - [`vis.text`](#vistext)     : arbitrary HTML
+- [`vis.audio`](#visaudio)    : audio
 - [`vis.video`](#visvideo)    : videos
 - [`vis.svg`](#vissvg)      : SVG object
+- [`vis.matplot`](#vismatplot)  : matplotlib plot
 - [`vis.save`](#vissave)     : serialize state server-side
 
 ### Plotting
@@ -193,6 +267,7 @@ vis._send({'data': [trace], 'layout': layout, 'win': 'mywin'})
 ### Others
 - [`vis.close`](#visclose)    : close a window by id
 - [`vis.win_exists`](#viswin_exists) : check if a window already exists by id
+- [`vis.get_window_data`](#visget_window_data): get current data for a window
 - [`vis.check_connection`](#vischeck_connection): check if the server is connected
 
 ## Details
@@ -225,10 +300,22 @@ This function prints text in a  box. You can use this to embed arbitrary HTML.
 It takes as input a `text` string.
 No specific `opts` are currently supported.
 
+#### vis.audio
+This function plays audio. It takes as input the filename of the audio
+file or an `N` tensor containing the waveform (use an `Nx2` matrix for stereo
+audio). The function does not support any plot-specific `opts`.
+
+The following `opts` are supported:
+
+- `opts.sample_frequency`: sample frequency (`integer` > 0; default = 44100)
+
+Known issue: Visdom uses scipy to convert tensor inputs to wave files. Some
+versions of Chrome are known not to play these wave files (Firefox and Safari work fine).
+
 #### vis.video
 This function plays a video. It takes as input the filename of the video
-`videofile` or a `LxCxHxW`-sized `tensor` (in Lua) or a or a `LxHxWxC`-sized
-`tensor` (in Python) containing all the frames of the video as input. The
+`videofile` or a `LxHxWxC`-sized
+`tensor` containing all the frames of the video as input. The
 function does not support any plot-specific `opts`.
 
 The following `opts` are supported:
@@ -243,6 +330,10 @@ to support the Theano codec in an OGG container (Chrome supports this).
 This function draws an SVG object. It takes as input a SVG string `svgstr` or
 the name of an SVG file `svgfile`. The function does not support any specific
 `opts`.
+
+#### vis.matplot
+This function draws a Matplotlib `plot`. The function does not support
+any plot-specific `opts`.
 
 #### vis.save
 This function saves the `envs` that are alive on the visdom server. It takes input a list (in python) or table (in lua) of env ids to be saved.
@@ -260,7 +351,7 @@ scatter plot. An optional `N` tensor `Y` containing discrete labels that
 range between `1` and `K` can be specified as well -- the labels will be
 reflected in the colors of the markers.
 
-`update` can be used to efficiently update the data of an existing plot. Use 'append' to append data, 'replace' to use new data. If updating a single trace, use `name` to specify the name of the trace to be updated. Update data that is all NaN is ignored (can be used for masking update).
+`update` can be used to efficiently update the data of an existing plot. Use 'append' to append data, 'replace' to use new data, or 'remove' to remove the trace specified by `name`. If updating a single trace, use `name` to specify the name of the trace to be updated. Update data that is all NaN is ignored (can be used for masking update).
 
 The following `opts` are supported:
 
@@ -269,6 +360,9 @@ The following `opts` are supported:
 - `opts.markersize`  : marker size (`number`; default = `'10'`)
 - `opts.markercolor` : color per marker. (`torch.*Tensor`; default = `nil`)
 - `opts.legend`      : `table` containing legend names
+- `opts.textlabels`  : text label for each point (`list`: default = `None`)
+- `opts.layoutopts`  : dict of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
+- `opts.traceopts`   : dict mapping trace names or indices to dicts of additional options that the graph backend accepts. For example `traceopts = {'plotly': {'myTrace': {'mode': 'markers'}}}`.
 
 `opts.markercolor` is a Tensor with Integer values. The tensor can be of size `N` or `N x 3` or `K` or `K x 3`.
 
@@ -284,7 +378,7 @@ to plot. It also takes an optional `X` tensor that specifies the
 corresponding x-axis values; `X` can be an `N` tensor (in which case all
 lines will share the same x-axis values) or have the same size as `Y`.
 
-`update` can be used to efficiently update the data of an existing plot. Use 'append' to append data, 'replace' to use new data. If updating a single trace, use `name` to specify the name of the trace to be updated. Update data that is all NaN is ignored (can be used for masking update).
+`update` can be used to efficiently update the data of an existing plot. Use 'append' to append data, 'replace' to use new data, or 'remove' to remove the trace specified by `name`. If updating a single trace, use `name` to specify the name of the trace to be updated. Update data that is all NaN is ignored (can be used for masking update).
 
 The following `opts` are supported:
 
@@ -294,6 +388,8 @@ The following `opts` are supported:
 - `opts.markersymbol`: marker symbol (`string`; default = `'dot'`)
 - `opts.markersize`  : marker size (`number`; default = `'10'`)
 - `opts.legend`      : `table` containing legend names
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
+- `opts.traceopts`   : `dict` mapping trace names or indices to `dict`s of additional options that plot.ly accepts for a trace.
 
 
 #### vis.updateTrace
@@ -327,6 +423,7 @@ The following `opts` are supported:
 
 - `opts.colormap`: colormap (`string`; default = `'Viridis'`)
 - `opts.legend`  : `table` containing legend names
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.heatmap
 This function draws a heatmap. It takes as input an `NxM` tensor `X` that
@@ -339,6 +436,7 @@ The following `opts` are supported:
 - `opts.xmax`       : clip maximum value (`number`; default = `X:max()`)
 - `opts.columnnames`: `table` containing x-axis labels
 - `opts.rownames`   : `table` containing y-axis labels
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.bar
 This function draws a regular, stacked, or grouped bar plot. It takes as
@@ -353,6 +451,7 @@ The following plot-specific `opts` are currently supported:
 - `opts.rownames`: `table` containing x-axis labels
 - `opts.stacked`    : stack multiple columns in `X`
 - `opts.legend`     : `table` containing legend labels
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.histogram
 This function draws a histogram of the specified data. It takes as input
@@ -362,6 +461,7 @@ histogram.
 The following plot-specific `opts` are currently supported:
 
 - `opts.numbins`: number of bins (`number`; default = 30)
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.boxplot
 This function draws boxplots of the specified data. It takes as input
@@ -371,6 +471,7 @@ to construct the `M` boxplots.
 The following plot-specific `opts` are currently supported:
 
 - `opts.legend`: labels for each of the columns in `X`
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.surf
 This function draws a surface plot. It takes as input an `NxM` tensor `X`
@@ -381,6 +482,7 @@ The following `opts` are supported:
 - `opts.colormap`: colormap (`string`; default = `'Viridis'`)
 - `opts.xmin`    : clip minimum value (`number`; default = `X:min()`)
 - `opts.xmax`    : clip maximum value (`number`; default = `X:max()`)
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.contour
 This function draws a contour plot. It takes as input an `NxM` tensor `X`
@@ -391,6 +493,7 @@ The following `opts` are supported:
 - `opts.colormap`: colormap (`string`; default = `'Viridis'`)
 - `opts.xmin`    : clip minimum value (`number`; default = `X:min()`)
 - `opts.xmax`    : clip maximum value (`number`; default = `X:max()`)
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.quiver
 This function draws a quiver plot in which the direction and length of the
@@ -402,6 +505,7 @@ The following `opts` are supported:
 
 - `opts.normalize`:  length of longest arrows (`number`)
 - `opts.arrowheads`: show arrow heads (`boolean`; default = `true`)
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 #### vis.mesh
 This function draws a mesh plot from a set of vertices defined in an
@@ -412,12 +516,13 @@ The following `opts` are supported:
 
 - `opts.color`: color (`string`)
 - `opts.opacity`: opacity of polygons (`number` between 0 and 1)
+- `opts.layoutopts`  : `dict` of any additional options that the graph backend accepts for a layout. For example `layoutopts = {'plotly': {'legend': {'x':0, 'y':0}}}`.
 
 ### Customizing plots
 
 The plotting functions take an optional `opts` table as input that can be used to change (generic or plot-specific) properties of the plots. All input arguments are specified in a single table; the input arguments are matches based on the keys they have in the input table.
 
-The following `opts` are generic in the sense that they are the same for all visualizations (except `plot.image` and `plot.text`):
+The following `opts` are generic in the sense that they are the same for all visualizations (except `plot.image`, `plot.text`, `plot.video`, and `plot.audio`):
 
 - `opts.title`       : figure title
 - `opts.width`       : figure width
@@ -431,6 +536,7 @@ The following `opts` are generic in the sense that they are the same for all vis
 - `opts.xtickvals`   : locations of ticks on x-axis (`table` of `number`s)
 - `opts.xticklabels` : ticks labels on x-axis (`table` of `string`s)
 - `opts.xtickstep`   : distances between ticks on x-axis (`number`)
+- `opts.xtickfont`   : font for x-axis labels (dict of [font information](https://plot.ly/javascript/reference/#layout-font))
 - `opts.ytype`       : type of y-axis (`'linear'` or `'log'`)
 - `opts.ylabel`      : label of y-axis
 - `opts.ytick`       : show ticks on y-axis (`boolean`)
@@ -439,6 +545,7 @@ The following `opts` are generic in the sense that they are the same for all vis
 - `opts.ytickvals`   : locations of ticks on y-axis (`table` of `number`s)
 - `opts.yticklabels` : ticks labels on y-axis (`table` of `string`s)
 - `opts.ytickstep`   : distances between ticks on y-axis (`number`)
+- `opts.ytickfont`   : font for y-axis labels (dict of [font information](https://plot.ly/javascript/reference/#layout-font))
 - `opts.marginleft`  : left margin (in pixels)
 - `opts.marginright` : right margin (in pixels)
 - `opts.margintop`   : top margin (in pixels)
@@ -459,6 +566,13 @@ This function returns a bool indicating whether or not a window `win` exists on 
 
 Optional arguments:
 - `env`: Environment to search for the window in. Default is `None`.
+
+#### vis.get_window_data
+This function returns the window data for the given window. Returns data for all windows in an env if win is None.
+
+Arguments:
+- `env`: Environment to search for the window in.
+- `win`: Window to return data for. Set to `None` to retrieve all the windows in an environment.
 
 #### vis.check_connection
 

@@ -6,54 +6,36 @@
 
 """Server"""
 
-from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
+from __future__ import print_function
 from __future__ import unicode_literals
 
-import math
-import json
-import logging
-import traceback
-import os
-import inspect
-import time
-import getpass
 import argparse
 import copy
-import visdom
-
+import getpass
+import inspect
+import json
+import logging
+import math
+import os
+import time
+import traceback
 from os.path import expanduser
+
+import visdom
 from zmq.eventloop import ioloop
+
 ioloop.install()  # Needs to happen before any tornado imports!
 
-import tornado.ioloop
-import tornado.web
-import tornado.websocket
-import tornado.escape
+import tornado.ioloop     # noqa E402: gotta install ioloop first
+import tornado.web        # noqa E402: gotta install ioloop first
+import tornado.websocket  # noqa E402: gotta install ioloop first
+import tornado.escape     # noqa E402: gotta install ioloop first
 
-parser = argparse.ArgumentParser(description='Start the visdom server.')
-parser.add_argument('-port', metavar='port', type=int, default=8097,
-                    help='port to run the server on.')
-parser.add_argument('-env_path', metavar='env_path', type=str,
-                    default='%s/.visdom/' % expanduser("~"),
-                    help='path to serialized session to reload.')
-parser.add_argument('-logging_level', metavar='logger_level', default='INFO',
-                    help='logging level (default = INFO). Can take logging '
-                         'level name or int (example: 20)')
-FLAGS = parser.parse_args()
-
-try:
-    logging_level = int(FLAGS.logging_level)
-except (ValueError,):
-    try:
-        logging_level = logging._checkLevel(FLAGS.logging_level)
-    except ValueError:
-        raise KeyError(
-            "Invalid logging level : {0}".format(FLAGS.logging_level)
-        )
-
-logging.getLogger().setLevel(logging_level)
+LAYOUT_FILE = 'layouts.json'
+DEFAULT_ENV_PATH = '%s/.visdom/' % expanduser("~")
+DEFAULT_PORT = 8097
 
 
 def get_rand_id():
@@ -71,7 +53,8 @@ def ensure_dir_exists(path):
 
 def get_path(filename):
     """Get the path to an asset."""
-    cwd = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+    cwd = os.path.dirname(
+        os.path.abspath(inspect.getfile(inspect.currentframe())))
     return os.path.join(cwd, filename)
 
 
@@ -100,68 +83,156 @@ tornado_settings = {
 }
 
 
-def serialize_env(state, eids):
-    l = [i for i in eids if i in state]
-    for i in l:
-        p = os.path.join(FLAGS.env_path, "{0}.json".format(i))
-        open(p, 'w').write(json.dumps(state[i]))
-    return l
+def serialize_env(state, eids, env_path=DEFAULT_ENV_PATH):
+    env_ids = [i for i in eids if i in state]
+    for env_id in env_ids:
+        env_path_file = os.path.join(env_path, "{0}.json".format(env_id))
+        open(env_path_file, 'w').write(json.dumps(state[env_id]))
+    return env_ids
 
 
-def serialize_all(state):
-    serialize_env(state, list(state.keys()))
+def serialize_all(state, env_path=DEFAULT_ENV_PATH):
+    serialize_env(state, list(state.keys()), env_path=env_path)
 
 
 class Application(tornado.web.Application):
-    def __init__(self):
-        state = {}
-        subs = {}
+    def __init__(self, port=DEFAULT_PORT, env_path=DEFAULT_ENV_PATH):
+        self.state = {}
+        self.subs = {}
+        self.sources = {}
+        self.env_path = env_path
+        self.port = port
 
         # reload state
-        ensure_dir_exists(FLAGS.env_path)
-        l = [i for i in os.listdir(FLAGS.env_path) if '.json' in i]
+        ensure_dir_exists(env_path)
+        env_jsons = [i for i in os.listdir(env_path) if '.json' in i]
 
-        for i in l:
-            p = os.path.join(FLAGS.env_path, i)
-            f = tornado.escape.json_decode(open(p, 'r').read())
-            eid = i.replace('.json', '')
-            state[eid] = {'jsons': f['jsons'], 'reload': f['reload']}
+        for env_json in env_jsons:
+            env_path_file = os.path.join(env_path, env_json)
+            env_data = tornado.escape.json_decode(open(env_path_file, 'r').read())
+            eid = env_json.replace('.json', '')
+            self.state[eid] = {'jsons': env_data['jsons'],
+                               'reload': env_data['reload']}
 
-        if 'main' not in state and 'main.json' not in l:
-            state['main'] = {'jsons': {}, 'reload': {}}
-            serialize_env(state, ['main'])
+        if 'main' not in self.state and 'main.json' not in env_jsons:
+            self.state['main'] = {'jsons': {}, 'reload': {}}
+            serialize_env(self.state, ['main'], env_path=self.env_path)
 
         handlers = [
-            (r"/events", PostHandler, dict(state=state, subs=subs)),
-            (r"/update", UpdateHandler, dict(state=state, subs=subs)),
-            (r"/close", CloseHandler, dict(state=state, subs=subs)),
-            (r"/socket", SocketHandler, dict(state=state, subs=subs)),
-            (r"/env/(.*)", EnvHandler, dict(state=state, subs=subs)),
-            (r"/save", SaveHandler, dict(state=state, subs=subs)),
-            (r"/error/(.*)", ErrorHandler, dict(state=state, subs=subs)),
-            (r"/win_exists", ExistsHandler, dict(state=state, subs=subs)),
-            (r"/(.*)", IndexHandler, dict(state=state, subs=subs)),
+            (r"/events", PostHandler, {'app': self}),
+            (r"/update", UpdateHandler, {'app': self}),
+            (r"/close", CloseHandler, {'app': self}),
+            (r"/socket", SocketHandler, {'app': self}),
+            (r"/vis_socket", VisSocketHandler, {'app': self}),
+            (r"/env/(.*)", EnvHandler, {'app': self}),
+            (r"/compare/(.*)", CompareHandler, {'app': self}),
+            (r"/save", SaveHandler, {'app': self}),
+            (r"/error/(.*)", ErrorHandler, {'app': self}),
+            (r"/win_exists", ExistsHandler, {'app': self}),
+            (r"/win_data", DataHandler, {'app': self}),
+            (r"/(.*)", IndexHandler, {'app': self}),
         ]
         super(Application, self).__init__(handlers, **tornado_settings)
 
 
-class SocketHandler(tornado.websocket.WebSocketHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+def broadcast_envs(handler, target_subs=None):
+    if target_subs is None:
+        target_subs = handler.subs.values()
+    for sub in target_subs:
+        sub.write_message(json.dumps(
+            {'command': 'env_update', 'data': list(handler.state.keys())}
+        ))
+
+
+def send_to_sources(handler, msg):
+    target_sources = handler.sources.values()
+    for source in target_sources:
+        source.write_message(json.dumps(msg))
+
+
+class VisSocketHandler(tornado.websocket.WebSocketHandler):
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     def check_origin(self, origin):
         return True
 
     def open(self):
         self.sid = str(hex(int(time.time() * 10000000))[2:])
+        if self not in list(self.sources.values()):
+            self.eid = 'main'
+            self.sources[self.sid] = self
+        logging.info('Opened visdom socket from ip: {}'.format(
+            self.request.remote_ip))
+
+        self.write_message(
+            json.dumps({'command': 'alive', 'data': 'vis_alive'}))
+
+    def on_message(self, message):
+        logging.info('from visdom client: {}'.format(message))
+        msg = tornado.escape.json_decode(tornado.escape.to_basestring(message))
+
+        cmd = msg.get('cmd')
+        if cmd == 'echo':
+            for sub in self.sources.values():
+                sub.write_message(json.dumps(msg))
+
+    def on_close(self):
+        if self in list(self.sources.values()):
+            self.sources.pop(self.sid, None)
+
+
+class SocketHandler(tornado.websocket.WebSocketHandler):
+    def initialize(self, app):
+        self.port = app.port
+        self.env_path = app.env_path
+        self.layouts = self.load_layouts()
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.broadcast_layouts()
+
+    def check_origin(self, origin):
+        return True
+
+    def broadcast_layouts(self, target_subs=None):
+        if target_subs is None:
+            target_subs = self.subs.values()
+        for sub in target_subs:
+            sub.write_message(json.dumps(
+                {'command': 'layout_update', 'data': self.layouts}
+            ))
+
+    def save_layouts(self):
+        layout_filepath = os.path.join(self.env_path, 'view', LAYOUT_FILE)
+        with open(layout_filepath, 'w') as fn:
+            fn.write(self.layouts)
+
+    def load_layouts(self):
+        layout_filepath = os.path.join(self.env_path, 'view', LAYOUT_FILE)
+        ensure_dir_exists(layout_filepath)
+        if os.path.isfile(layout_filepath):
+            with open(layout_filepath, 'r') as fn:
+                return fn.read()
+        else:
+            return ""
+
+    def open(self):
+        self.sid = str(hex(int(time.time() * 10000000))[2:])
         if self not in list(self.subs.values()):
             self.eid = 'main'
             self.subs[self.sid] = self
-        logging.info('Opened new socket from ip: {}'.format(self.request.remote_ip))
+        logging.info(
+            'Opened new socket from ip: {}'.format(self.request.remote_ip))
 
         self.write_message(
             json.dumps({'command': 'register', 'data': self.sid}))
+        self.broadcast_layouts([self])
+        broadcast_envs(self, [self])
 
     def on_message(self, message):
         logging.info('from web client: {}'.format(message))
@@ -171,16 +242,40 @@ class SocketHandler(tornado.websocket.WebSocketHandler):
         if cmd == 'close':
             if 'data' in msg and 'eid' in msg:
                 logging.info('closing window {}'.format(msg['data']))
-                self.state[msg['eid']]['jsons'].pop(msg['data'], None)
-
+                p_data = self.state[msg['eid']]['jsons'].pop(msg['data'], None)
+                event = {
+                    'event_type': 'Close',
+                    'target': msg['data'],
+                    'eid': msg['eid'],
+                    'pane_data': p_data,
+                }
+                send_to_sources(self, event)
         elif cmd == 'save':
             # save localStorage window metadata
             if 'data' in msg and 'eid' in msg:
                 msg['eid'] = escape_eid(msg['eid'])
-                self.state[msg['eid']] = copy.deepcopy(self.state[msg['prev_eid']])
+                self.state[msg['eid']] = \
+                    copy.deepcopy(self.state[msg['prev_eid']])
                 self.state[msg['eid']]['reload'] = msg['data']
                 self.eid = msg['eid']
-                serialize_env(self.state, [self.eid])
+                serialize_env(self.state, [self.eid], env_path=self.env_path)
+        elif cmd == 'delete_env':
+            if 'eid' in msg:
+                logging.info('closing environment {}'.format(msg['eid']))
+                del self.state[msg['eid']]
+                p = os.path.join(self.env_path, "{0}.json".format(msg['eid']))
+                os.remove(p)
+                broadcast_envs(self)
+        elif cmd == 'save_layouts':
+            if 'data' in msg:
+                self.layouts = msg.get('data')
+                self.save_layouts()
+                self.broadcast_layouts()
+        elif cmd == 'forward_to_vis':
+            packet = msg.get('data')
+            environment = self.state[packet['eid']]
+            packet['pane_data'] = environment['jsons'][packet['target']]
+            send_to_sources(self, msg.get('data'))
 
     def on_close(self):
         if self in list(self.subs.values()):
@@ -203,16 +298,33 @@ class BaseHandler(tornado.web.RequestHandler):
             # 2. The actual Exception that was thrown
             # 3. The traceback opbject
             try:
-                params = dict(
-                    error=exc_info[1],
-                    trace_info=traceback.format_exception(*exc_info),
-                    request=self.request.__dict__
-                )
+                params = {
+                    'error': exc_info[1],
+                    'trace_info': traceback.format_exception(*exc_info),
+                    'request': self.request.__dict__
+                }
 
                 self.render("error.html", **params)
                 logging.error("rendering complete")
             except Exception as e:
                 logging.error(e)
+
+
+def update_window(p, args):
+    """Adds new args to a window if they exist"""
+    content = p['content']
+    layout = content['layout']
+    layout.update(args.get('layout', {}))
+    opts = args.get('opts', {})
+    for opt_name, opt_val in opts.items():
+        if opt_name in p:
+            p[opt_name] = opt_val
+
+    if 'legend' in opts:
+        pdata = p['content']['data']
+        for i, d in enumerate(pdata):
+            d['name'] = opts['legend'][i]
+    return p
 
 
 def window(args):
@@ -235,9 +347,9 @@ def window(args):
     }
 
     if ptype in ['image', 'text']:
-        p.update(dict(content=args['data'][0]['content'], type=ptype))
+        p.update({'content': args['data'][0]['content'], 'type': ptype})
     else:
-        p['content'] = dict(data=args['data'], layout=args['layout'])
+        p['content'] = {'data': args['data'], 'layout': args['layout']}
         p['type'] = 'plot'
 
     return p
@@ -262,6 +374,7 @@ def register_window(self, p, eid):
     env[p['id']] = p
 
     broadcast(self, p, eid)
+    broadcast_envs(self)
     self.write(p['id'])
 
 
@@ -278,15 +391,19 @@ def unpack_lua(req_args):
 
 
 class PostHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
-        self.vis = visdom.Visdom(port=FLAGS.port, send=False)
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
+        self.vis = visdom.Visdom(port=self.port, send=False)
         self.handlers = {
             'update': UpdateHandler,
             'save': SaveHandler,
             'close': CloseHandler,
             'win_exists': ExistsHandler,
+            'delete_env': DeleteEnvHandler,
         }
 
     def func(self, req):
@@ -326,9 +443,12 @@ class PostHandler(BaseHandler):
 
 
 class ExistsHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     @staticmethod
     def wrap_func(handler, args):
@@ -347,9 +467,12 @@ class ExistsHandler(BaseHandler):
 
 
 class UpdateHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     # TODO remove when updateTrace is to be deprecated
     @staticmethod
@@ -377,7 +500,7 @@ class UpdateHandler(BaseHandler):
                 pdata[idx]['marker']['color'] = new_data['marker']
 
         for n, idx in enumerate(idxs):    # update traces
-            if all([math.isnan(i) or i is None for i in new_data['x'][n]]):
+            if all(math.isnan(i) or i is None for i in new_data['x'][n]):
                 continue
 
             pdata[idx]['x'] = (pdata[idx]['x'] + new_data['x'][n]) if append \
@@ -396,33 +519,43 @@ class UpdateHandler(BaseHandler):
 
         pdata = p['content']['data']
 
-        new_data = args['data']
+        new_data = args.get('data')
         # TODO remove when updateTrace is deprecated
         if isinstance(new_data, dict):
             return UpdateHandler.update_updateTrace(p, args)
+        p = update_window(p, args)
         name = args.get('name')
+        if name is None and new_data is None:
+            return p  # we only updated the opts or layout
         append = args.get('append')
 
         idxs = list(range(len(pdata)))
 
         if name is not None:
-            assert len(new_data) == 1
+            assert len(new_data) == 1 or args.get('delete')
             idxs = [i for i in idxs if pdata[i]['name'] == name]
+
+        # Delete a trace
+        if args.get('delete'):
+            for idx in idxs:
+                del pdata[idx]
+            return p
 
         # inject new trace
         if len(idxs) == 0:
             idx = len(pdata)
-            pdata.append(dict(pdata[0]))   # plot is not empty, clone an entry
-            pdata[idx]['name'] = name
+            pdata.append(dict(pdata[0]))  # plot is not empty, clone an entry
             idxs = [idx]
             append = False
             pdata[idx] = new_data[0]
             for k, v in new_data[0].items():
                 pdata[idx][k] = v
+            pdata[idx]['name'] = name
             return p
 
-        for n, idx in enumerate(idxs):    # update traces
-            if all([math.isnan(i) or i is None for i in new_data[n]['x']]):
+        # Update traces
+        for n, idx in enumerate(idxs):
+            if all(math.isnan(i) or i is None for i in new_data[n]['x']):
                 continue
             # handle data for plotting
             for axis in ['x', 'y']:
@@ -476,16 +609,20 @@ class UpdateHandler(BaseHandler):
 
 
 class CloseHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     @staticmethod
     def wrap_func(handler, args):
         eid = extract_eid(args)
         win = args.get('win')
 
-        keys = list(handler.state[eid]['jsons'].keys()) if win is None else [win]
+        keys = \
+            list(handler.state[eid]['jsons'].keys()) if win is None else [win]
         for win in keys:
             handler.state[eid]['jsons'].pop(win, None)
             broadcast(
@@ -499,14 +636,38 @@ class CloseHandler(BaseHandler):
         self.wrap_func(self, args)
 
 
-def load_env(state, eid, socket):
+class DeleteEnvHandler(BaseHandler):
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
+
+    @staticmethod
+    def wrap_func(handler, args):
+        eid = extract_eid(args)
+        if eid is not None:
+            del handler.state[eid]
+            p = os.path.join(handler.env_path, "{0}.json".format(eid))
+            os.remove(p)
+            broadcast_envs(handler)
+
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
+
+
+def load_env(state, eid, socket, env_path=DEFAULT_ENV_PATH):
     """ load an environment to a client by socket """
 
     env = {}
     if eid in state:
         env = state.get(eid)
     else:
-        p = os.path.join(FLAGS.env_path, eid.strip(), '.json')
+        p = os.path.join(env_path, eid.strip(), '.json')
         if os.path.exists(p):
             env = tornado.escape.json_decode(open(p, 'r').read())
             state[eid] = env
@@ -525,19 +686,136 @@ def load_env(state, eid, socket):
     socket.eid = eid
 
 
-def gather_envs(state):
-    items = [i.replace('.json', '') for i in os.listdir(FLAGS.env_path)
-                if '.json' in i]
+def gather_envs(state, env_path=DEFAULT_ENV_PATH):
+    items = [i.replace('.json', '') for i in os.listdir(env_path)
+             if '.json' in i]
     return sorted(list(set(items + list(state.keys()))))
 
 
+def compare_envs(state, eids, socket, env_path=DEFAULT_ENV_PATH):
+    logging.info('comparing envs')
+    eidNums = {e: str(i) for i, e in enumerate(eids)}
+    env = {}
+    envs = {}
+    for eid in eids:
+        if eid in state:
+            envs[eid] = state.get(eid)
+        else:
+            p = os.path.join(env_path, eid.strip(), '.json')
+            if os.path.exists(p):
+                env = tornado.escape.json_decode(open(p, 'r').read())
+                state[eid] = env
+                envs[eid] = env
+
+    res = copy.deepcopy(envs[list(envs.keys())[0]])
+    name2Wid = {res['jsons'][wid].get('title', None): wid + '_compare'
+                for wid in res.get('jsons', {})
+                if 'title' in res['jsons'][wid]}
+    for wid in list(res['jsons'].keys()):
+        res['jsons'][wid + '_compare'] = res['jsons'][wid]
+        res['jsons'][wid] = None
+        res['jsons'].pop(wid)
+
+    for ix, eid in enumerate(envs.keys()):
+        env = envs[eid]
+        for wid in env.get('jsons', {}).keys():
+            win = env['jsons'][wid]
+            if win.get('type', None) != 'plot':
+                continue
+            if 'content' not in win:
+                continue
+            if 'title' not in win:
+                continue
+            title = win['title']
+            if title not in name2Wid or title == '':
+                continue
+
+            destWid = name2Wid[title]
+            destWidJson = res['jsons'][destWid]
+            # Combine plots with the same window title. If plot data source was
+            # labeled "name" in the legend, rename to "envId_legend" where
+            # envId is enumeration of the selected environments (not the long
+            # environment id string). This makes plot lines more readable.
+            if ix == 0:
+                if 'name' not in destWidJson['content']['data'][0]:
+                    continue  # Skip windows with unnamed data
+                destWidJson['has_compare'] = False
+                destWidJson['content']['layout']['showlegend'] = True
+                for dataIdx, data in enumerate(destWidJson['content']['data']):
+                    if 'name' not in data:
+                        break  # stop working with this plot, not right format
+                    destWidJson['content']['data'][dataIdx]['name'] = \
+                        '{}_{}'.format(eidNums[eid], data['name'])
+            else:
+                if 'name' not in destWidJson['content']['data'][0]:
+                    continue  # Skip windows with unnamed data
+                # has_compare will be set to True only if the window title is
+                # shared by at least 2 envs.
+                destWidJson['has_compare'] = True
+                for _dataIdx, data in enumerate(win['content']['data']):
+                    data = copy.deepcopy(data)
+                    if 'name' not in data:
+                        destWidJson['has_compare'] = False
+                        break  # stop working with this plot, not right format
+                    data['name'] = '{}_{}'.format(eidNums[eid], data['name'])
+                    destWidJson['content']['data'].append(data)
+
+    # Make sure that only plots that are shared by at least two envs are shown.
+    # Check has_compare flag
+    for destWid in list(res['jsons'].keys()):
+        if ('has_compare' not in res['jsons'][destWid]) or \
+                (not res['jsons'][destWid]['has_compare']):
+            del res['jsons'][destWid]
+
+    # create legend mapping environment names to environment numbers so one can
+    # look it up for the new legend
+    tableRows = ["<tr> <td> {} </td> <td> {} </td> </tr>".format(v, eidNums[v])
+                 for v in eidNums]
+
+    tbl = """"<style>
+    table, th, td {{
+        border: 1px solid black;
+    }}
+    </style>
+    <table> {} </table>""".format(' '.join(tableRows))
+
+    res['jsons']['window_compare_legend'] = {
+        "command": "window",
+        "id": "window_compare_legend",
+        "title": "compare_legend",
+        "inflate": True,
+        "width": None,
+        "height": None,
+        "contentID": "compare_legend",
+        "content": tbl,
+        "type": "text",
+        "layout": {"title": "compare_legend"},
+        "i": 1
+    }
+    if 'reload' in res:
+        socket.write_message(
+            json.dumps({'command': 'reload', 'data': res['reload']})
+        )
+
+    jsons = list(res.get('jsons', {}).values())
+    windows = sorted(jsons, key=lambda k: ('i' not in k, k.get('i', None)))
+    for v in windows:
+        socket.write_message(v)
+
+    socket.write_message(json.dumps({'command': 'layout'}))
+    socket.eid = eid
+
+
 class EnvHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     def get(self, eid):
-        items = gather_envs(self.state)
+        items = gather_envs(self.state, env_path=self.env_path)
         active = 'main' if eid not in items else eid
         self.render(
             'index.html',
@@ -550,19 +828,50 @@ class EnvHandler(BaseHandler):
         sid = tornado.escape.json_decode(
             tornado.escape.to_basestring(self.request.body)
         )['sid']
-        load_env(self.state, args, self.subs[sid])
+        load_env(self.state, args, self.subs[sid], env_path=self.env_path)
+
+
+class CompareHandler(BaseHandler):
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.env_path = app.env_path
+
+    # TODO fix get paths for compare
+    # def get(self, eids):
+    #     items = gather_envs(self.state)
+    #     eids = eids.split('+')
+    #     eids = [x for x in eids if x in items]
+    #     self.render(
+    #         'index.html',
+    #         user=getpass.getuser(),
+    #         items=eids,
+    #         active_item=active
+    #     )
+
+    def post(self, args):
+        sid = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )['sid']
+        compare_envs(self.state, args.split('+'), self.subs[sid],
+                     self.env_path)
 
 
 class SaveHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
-        self.subs = subs
+    def initialize(self, app):
+        self.state = app.state
+        self.subs = app.subs
+        self.sources = app.sources
+        self.port = app.port
+        self.env_path = app.env_path
 
     @staticmethod
     def wrap_func(handler, args):
         envs = args['data']
         envs = [escape_eid(eid) for eid in envs]
-        ret = serialize_env(handler.state, envs)  # this ignores invalid env ids
+        # this drops invalid env ids
+        ret = serialize_env(handler.state, envs, env_path=handler.env_path)
         handler.write(json.dumps(ret))
 
     def post(self):
@@ -572,12 +881,43 @@ class SaveHandler(BaseHandler):
         self.wrap_func(self, args)
 
 
+class DataHandler(BaseHandler):
+    def initialize(self, app):
+        self.state = app.state
+        self.port = app.port
+        self.env_path = app.env_path
+
+    @staticmethod
+    def wrap_func(handler, args):
+        eid = extract_eid(args)
+
+        if 'win' in args and args['win'] is not None:
+            assert args['win'] in handler.state[eid]['jsons'], \
+                "Window {} doesn't exist in env {}".format(args['win'], eid)
+            handler.write(json.dumps(handler.state[eid]['jsons'][args['win']]))
+        else:
+            handler.write(json.dumps(handler.state[eid]['jsons']))
+
+        if args['win'] in handler.state[eid]['jsons']:
+            handler.write('true')
+        else:
+            handler.write('false')
+
+    def post(self):
+        args = tornado.escape.json_decode(
+            tornado.escape.to_basestring(self.request.body)
+        )
+        self.wrap_func(self, args)
+
+
 class IndexHandler(BaseHandler):
-    def initialize(self, state, subs):
-        self.state = state
+    def initialize(self, app):
+        self.state = app.state
+        self.port = app.port
+        self.env_path = app.env_path
 
     def get(self, args, **kwargs):
-        items = gather_envs(self.state)
+        items = gather_envs(self.state, env_path=self.env_path)
         self.render(
             'index.html',
             user=getpass.getuser(),
@@ -595,6 +935,8 @@ class ErrorHandler(BaseHandler):
 # function that downloads and installs javascript, css, and font dependencies:
 def download_scripts(proxies=None, install_dir=None):
 
+    print("Downloading scripts. It might take a while.")
+
     # location in which to download stuff:
     if install_dir is None:
         import visdom
@@ -604,21 +946,26 @@ def download_scripts(proxies=None, install_dir=None):
     b = 'https://unpkg.com/'
     bb = '%sbootstrap@3.3.7/dist/' % b
     ext_files = {
+        ## js
         '%sjquery@3.1.1/dist/jquery.min.js' % b: 'jquery.min.js',
         '%sbootstrap@3.3.7/dist/js/bootstrap.min.js' % b: 'bootstrap.min.js',
-        '%sreact-resizable@1.4.6/css/styles.css' % b: 'react-resizable-styles.css',
-        '%sreact-grid-layout@0.14.0/css/styles.css' % b: 'react-grid-layout-styles.css',
-        '%sreact@15.6.1/dist/react.min.js' % b: 'react-react.min.js',
-        '%sreact-dom@15.6.1/dist/react-dom.min.js' % b: 'react-dom.min.js',
+        '%sreact@16.2.0/umd/react.production.min.js' % b: 'react-react.min.js',
+        '%sreact-dom@16.2.0/umd/react-dom.production.min.js' % b: 'react-dom.min.js',
+        '%sreact-modal@3.1.10/dist/react-modal.min.js' % b: 'react-modal.min.js',  # noqa
+        'https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_SVG':  # noqa
+            'mathjax-MathJax.js',
+        # here is another url in case the cdn breaks down again.
+        # https://raw.githubusercontent.com/plotly/plotly.js/master/dist/plotly.min.js
+        'https://cdn.plot.ly/plotly-latest.min.js': 'plotly-plotly.min.js',
+
+        ## css
+        '%sreact-resizable@1.4.6/css/styles.css' % b: 'react-resizable-styles.css',  # noqa
+        '%sreact-grid-layout@0.16.3/css/styles.css' % b: 'react-grid-layout-styles.css',  # noqa
+        '%scss/bootstrap.min.css' % bb: 'bootstrap.min.css',
+
+        ## fonts
         '%sclassnames@2.2.5' % b: 'classnames',
         '%slayout-bin-packer@1.2.2' % b: 'layout_bin_packer',
-        'https://cdn.rawgit.com/STRML/react-grid-layout/0.14.0/dist/' +
-        'react-grid-layout.min.js': 'react-grid-layout.min.js',
-        'https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_SVG':
-            'mathjax-MathJax.js',
-        'https://cdn.rawgit.com/plotly/plotly.js/master/dist/plotly.min.js':
-            'plotly-plotly.min.js',
-        '%scss/bootstrap.min.css' % bb: 'bootstrap.min.css',
         '%sfonts/glyphicons-halflings-regular.eot' % bb:
             'glyphicons-halflings-regular.eot',
         '%sfonts/glyphicons-halflings-regular.woff2' % bb:
@@ -627,7 +974,7 @@ def download_scripts(proxies=None, install_dir=None):
             'glyphicons-halflings-regular.woff',
         '%sfonts/glyphicons-halflings-regular.ttf' % bb:
             'glyphicons-halflings-regular.ttf',
-        '%sfonts/glyphicons-halflings-regular.svg#glyphicons_halflingsregular' % bb:
+        '%sfonts/glyphicons-halflings-regular.svg#glyphicons_halflingsregular' % bb:  # noqa
             'glyphicons-halflings-regular.svg#glyphicons_halflingsregular',
     }
 
@@ -647,7 +994,7 @@ def download_scripts(proxies=None, install_dir=None):
     from six.moves.urllib import request
     from six.moves.urllib.error import HTTPError, URLError
     handler = request.ProxyHandler(proxies) if proxies is not None \
-         else request.BaseHandler()
+        else request.BaseHandler()
     opener = request.build_opener(handler)
     request.install_opener(opener)
 
@@ -664,26 +1011,62 @@ def download_scripts(proxies=None, install_dir=None):
         # download file:
         filename = '%s/static/%s/%s' % (install_dir, sub_dir, val)
         if not os.path.exists(filename):
-            req = request.Request(key, headers={'User-Agent': 'Chrome/30.0.0.0'})
+            req = request.Request(key,
+                                  headers={'User-Agent': 'Chrome/30.0.0.0'})
             try:
                 data = opener.open(req).read()
                 with open(filename, 'wb') as fwrite:
                     fwrite.write(data)
-            except (HTTPError, URLError) as exc:
-                logging.error('Error {} while downloading {}'.format(exc.code, key))
+            except HTTPError as exc:
+                logging.error('Error {} while downloading {}'.format(
+                    exc.code, key))
+            except URLError as exc:
+                logging.error('Error {} while downloading {}'.format(
+                    exc.reason, key))
 
 
-def main():
+def start_server(port=DEFAULT_PORT, env_path=DEFAULT_ENV_PATH, print_func=None):
     print("It's Alive!")
-    app = Application()
-    app.listen(FLAGS.port, max_buffer_size=1024 ** 3)
+    app = Application(port=port, env_path=env_path)
+    app.listen(port, max_buffer_size=1024 ** 3)
     logging.info("Application Started")
     if "HOSTNAME" in os.environ:
         hostname = os.environ["HOSTNAME"]
     else:
         hostname = "localhost"
-    print("You can navigate to http://%s:%s" % (hostname, FLAGS.port))
+    if print_func is None:
+        print("You can navigate to http://%s:%s" % (hostname, port))
+    else:
+        print_func(port)
     ioloop.IOLoop.instance().start()
+
+
+def main(print_func=None):
+
+    parser = argparse.ArgumentParser(description='Start the visdom server.')
+    parser.add_argument('-port', metavar='port', type=int, default=DEFAULT_PORT,
+                        help='port to run the server on.')
+    parser.add_argument('-env_path', metavar='env_path', type=str,
+                        default=DEFAULT_ENV_PATH,
+                        help='path to serialized session to reload.')
+    parser.add_argument('-logging_level', metavar='logger_level', default='INFO',
+                        help='logging level (default = INFO). Can take logging '
+                             'level name or int (example: 20)')
+    FLAGS = parser.parse_args()
+
+    try:
+        logging_level = int(FLAGS.logging_level)
+    except (ValueError,):
+        try:
+            logging_level = logging._checkLevel(FLAGS.logging_level)
+        except ValueError:
+            raise KeyError(
+                "Invalid logging level : {0}".format(FLAGS.logging_level)
+            )
+
+    logging.getLogger().setLevel(logging_level)
+
+    start_server(port=FLAGS.port, env_path=FLAGS.env_path, print_func=print_func)
 
 
 if __name__ == "__main__":
